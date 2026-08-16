@@ -7,3 +7,6 @@ gift-card-ledger-*.json
 
 # local build staging (may contain payload.js)
 dist/
+
+# wrangler local state
+.wrangler/
