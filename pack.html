@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ledger Packer &mdash; encrypt your cards</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono&display=swap');
+*{box-sizing:border-box}
+body{margin:0;padding:34px 20px 70px;background:#F3F6F8;color:#16202B;
+font-family:'Space Grotesk',system-ui,sans-serif;line-height:1.55;}
+.w{max-width:660px;margin:0 auto;}
+h1{font-size:26px;letter-spacing:-.02em;margin:0 0 6px;}
+.sub{color:#65727F;font-size:14px;margin:0 0 26px;}
+.card{background:#fff;border:1px solid #DBE2E8;border-radius:16px;padding:22px;margin-bottom:16px;}
+h2{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:#65727F;margin:0 0 14px;font-weight:600;}
+label{display:block;font-size:13px;font-weight:600;margin:0 0 7px;}
+input,textarea{width:100%;padding:12px 14px;font-size:15px;border:1.5px solid #DBE2E8;border-radius:11px;
+background:#F7F9FB;font-family:'IBM Plex Mono',monospace;outline:none;}
+input:focus,textarea:focus{border-color:#0F6E52;background:#fff;}
+textarea{min-height:150px;resize:vertical;font-size:12px;line-height:1.5;}
+button{margin-top:16px;padding:14px 22px;font-size:15px;font-weight:600;font-family:inherit;color:#fff;
+background:#0F6E52;border:none;border-radius:11px;cursor:pointer;}
+button:disabled{opacity:.4;cursor:default;}
+.hint{font-size:12.5px;color:#65727F;margin-top:9px;}
+.warn{background:#FFF3E2;border:1px solid #F0C98A;border-left:4px solid #C97A14;border-radius:12px;
+padding:14px 16px;font-size:13.5px;color:#5E3703;margin-bottom:20px;}
+.ok{background:#E7F5EE;border:1px solid #9AD3B8;border-left:4px solid #0F7A52;border-radius:12px;
+padding:14px 16px;font-size:13.5px;color:#0A4A33;margin-top:16px;display:none;}
+.err{color:#C0362B;font-size:13px;margin-top:10px;}
+ol{padding-left:20px;font-size:14px;} li{margin-bottom:7px;}
+code{font-family:'IBM Plex Mono',monospace;background:#EDF1F4;padding:1px 5px;border-radius:4px;font-size:12.5px;}
+</style>
+</head>
+<body><div class="w">
+<h1>Ledger Packer</h1>
+<p class="sub">Encrypts your cards with a passphrase, on this machine, before they ever go on a server.</p>
+
+<div class="warn"><strong>Run this locally.</strong> Open this file from your own disk
+(<code>file://</code>). It makes no network requests &mdash; your passphrase and card data never leave
+this page. Nothing here is sent to Claude, Anthropic, or anyone else.</div>
+
+<div class="card">
+  <h2>1 &middot; Your ledger</h2>
+  <label for="f">Load the ledger JSON</label>
+  <input type="file" id="f" accept="application/json,.json">
+  <p class="hint">Use the <code>gift-card-ledger-plaintext.json</code> file that came with this packer,
+  or any JSON exported from the app.</p>
+  <label for="j" style="margin-top:16px">&hellip;or paste it here</label>
+  <textarea id="j" placeholder="[ { &quot;brand&quot;: &hellip; } ]" spellcheck="false"></textarea>
+  <div id="count" class="hint"></div>
+</div>
+
+<div class="card">
+  <h2>2 &middot; Your passphrase</h2>
+  <label for="p">Passphrase</label>
+  <input type="password" id="p" autocomplete="new-password" placeholder="Choose something long">
+  <label for="p2" style="margin-top:14px">Confirm</label>
+  <input type="password" id="p2" autocomplete="new-password" placeholder="Type it again">
+  <p class="hint">Use a passphrase of several words. <strong>There is no recovery</strong> &mdash; if you
+  lose it, the encrypted ledger cannot be opened by anyone, including you. Keep the plaintext JSON
+  somewhere safe as your backup.</p>
+  <div id="err" class="err"></div>
+  <button id="go" disabled>Encrypt and download payload.js</button>
+  <div id="ok" class="ok"><strong>Done.</strong> <code>payload.js</code> has downloaded.
+  Put it in the same folder as <code>index.html</code>, then deploy that folder.</div>
+</div>
+
+<div class="card">
+  <h2>3 &middot; Deploy</h2>
+  <ol>
+    <li>Put <code>payload.js</code> next to <code>index.html</code>.</li>
+    <li>Drag the whole folder onto a static host &mdash; Netlify Drop, Cloudflare Pages or Vercel all
+        take a folder and give you an HTTPS URL. HTTPS is required: without it the offline service
+        worker will not run.</li>
+    <li>Open the URL on your iPhone in Safari &rarr; Share &rarr; <strong>Add to Home Screen</strong>.</li>
+    <li>Open it once while online so it caches, then it works with no signal.</li>
+  </ol>
+</div>
+</div>
+
+<script type="module">
+// Shared crypto — used by both the app and the packer so they can never drift apart.
+const ENC = new TextEncoder(), DEC = new TextDecoder();
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+const ITER = 250000;
+
+async function deriveKey(pass, salt) {
+  const base = await crypto.subtle.importKey("raw", ENC.encode(pass), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: ITER, hash: "SHA-256" },
+    base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
+async function seal(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, ENC.encode(JSON.stringify(obj)));
+  return { iv: b64(iv), ct: b64(ct) };
+}
+
+async function unseal(key, box) {
+  const pt = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: unb64(box.iv) }, key, unb64(box.ct));
+  return JSON.parse(DEC.decode(pt));
+}
+
+// Build an encrypted payload from plaintext cards + a passphrase.
+async function pack(pass, cards) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(pass, salt);
+  const box = await seal(key, cards);
+  // `check` lets the app reject a wrong passphrase without decrypting the whole ledger
+  const check = await seal(key, "gcl-ok");
+  return { v: 1, iter: ITER, salt: b64(salt), check, box };
+}
+
+async function unpack(pass, payload) {
+  const key = await deriveKey(pass, unb64(payload.salt));
+  try {
+    if (await unseal(key, payload.check) !== "gcl-ok") throw new Error("bad");
+  } catch { return null; }              // wrong passphrase
+  return await unseal(key, payload.box);
+}
+
+
+const $ = (id) => document.getElementById(id);
+let cards = null;
+
+function setCards(text) {
+  $("err").textContent = "";
+  try {
+    const parsed = JSON.parse(text);
+    cards = Array.isArray(parsed) ? parsed : (parsed.cards || null);
+    if (!Array.isArray(cards)) throw new Error("no card array found");
+    const total = cards.reduce((s, c) => s + (Number(c.remaining != null ? c.remaining : c.face) || 0), 0);
+    $("count").textContent = cards.length + " cards · $" + total.toFixed(2) + " loaded";
+  } catch (e) {
+    cards = null; $("count").textContent = "";
+    $("err").textContent = "That doesn't parse as ledger JSON: " + e.message;
+  }
+  check();
+}
+
+function check() {
+  const p = $("p").value, p2 = $("p2").value;
+  $("go").disabled = !(cards && p.length >= 8 && p === p2);
+  if (p && p2 && p !== p2) $("err").textContent = "The two passphrases don't match.";
+  else if (p && p.length < 8) $("err").textContent = "Use at least 8 characters — longer is better.";
+  else if (!$("err").textContent.startsWith("That doesn't")) $("err").textContent = "";
+}
+
+$("f").addEventListener("change", (e) => {
+  const file = e.target.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = () => { $("j").value = r.result; setCards(r.result); };
+  r.readAsText(file);
+});
+$("j").addEventListener("input", (e) => setCards(e.target.value));
+$("p").addEventListener("input", check);
+$("p2").addEventListener("input", check);
+
+$("go").addEventListener("click", async () => {
+  $("go").disabled = true; $("go").textContent = "Encrypting…";
+  await new Promise((r) => setTimeout(r, 40));
+  const payload = await pack($("p").value, cards);
+  const js = "window.__PAYLOAD__=" + JSON.stringify(payload) + ";";
+  const url = URL.createObjectURL(new Blob([js], { type: "application/javascript" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "payload.js"; document.body.appendChild(a); a.click();
+  document.body.removeChild(a); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  $("ok").style.display = "block";
+  $("go").textContent = "Encrypt and download payload.js";
+  $("p").value = ""; $("p2").value = "";
+  check();
+});
+</script>
+</body></html>

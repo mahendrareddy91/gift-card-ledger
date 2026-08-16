@@ -1,0 +1,6 @@
+# Never commit card data. The ledger lives on your device, not in git.
+payload.js
+*plaintext*.json
+gift-card-ledger-*.json
+
+.DS_Store
