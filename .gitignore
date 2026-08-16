@@ -4,3 +4,6 @@ payload.js
 gift-card-ledger-*.json
 
 .DS_Store
+
+# local build staging (may contain payload.js)
+dist/
